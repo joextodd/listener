@@ -72,13 +72,12 @@ loop()
   if (cnt != rx_buf_cnt) {
     for (int y = 0; y < SLC_BUF_LEN; y++) {
       if (i2s_slc_buf_pntr[rx_buf_cnt][y] > 0) {
-        uint32_t value = ~(i2s_slc_buf_pntr[rx_buf_cnt][y]) & 0xFFFFFF;
-        uint32_t mask = value & 0x800000;
-        int32_t output = ((value & 0xFF0000) >> 16) | (value & 0xFF00) | ((value & 0xFF) << 16);
-        if (mask) {
-          output = output * -1;
-        }
-        Serial.println(output);
+        int32_t value = ~(i2s_slc_buf_pntr[rx_buf_cnt][y]);
+        value >>= 14;
+        String withScale = "-131072 ";
+        withScale += value;
+        withScale += " 131072";
+        Serial.println(withScale);
       }
     }
     cnt = rx_buf_cnt;
@@ -94,7 +93,7 @@ i2s_init()
   // Config RX pin function
   PIN_FUNC_SELECT(PERIPHS_IO_MUX_MTDI_U, FUNC_I2SI_DATA);
   PIN_FUNC_SELECT(PERIPHS_IO_MUX_MTCK_U, FUNC_I2SI_BCK);
-//  PIN_FUNC_SELECT(PERIPHS_IO_MUX_MTMS_U, FUNC_I2SI_WS);
+  PIN_FUNC_SELECT(PERIPHS_IO_MUX_MTMS_U, FUNC_I2SI_WS);
 
   // Enable a 160MHz clock
   I2S_CLK_ENABLE();
@@ -110,10 +109,10 @@ i2s_init()
   // Enable DMA
   I2SFC |= I2SDE;
 
-  // Set RX single channel (right)
+  // Set RX single channel (left)
   I2SCC &= ~((I2STXCMM << I2STXCM) | (I2SRXCMM << I2SRXCM));
-  I2SCC |= (1 << I2SRXCM);
-  i2s_set_rate(96000);
+//  I2SCC |= (2 << I2SRXCM);
+  i2s_set_rate(32000);
 
   // Set RX data to be received
   I2SRXEN = SLC_BUF_LEN;
@@ -167,8 +166,7 @@ slc_init()
   // Configure DMA
   SLCC0 &= ~(SLCMM << SLCM);      // Clear DMA MODE
   SLCC0 |= (1 << SLCM);           // Set DMA MODE to 1
-//  SLCRXDC |= SLCBINR | SLCBTNR;   // Enable INFOR_NO_REPLACE and TOKEN_NO_REPLACE
-//  SLCRXDC &= ~(SLCBRXFE | SLCBRXEM | SLCBRXFM);
+  SLCRXDC |= SLCBINR | SLCBTNR;   // Enable INFOR_NO_REPLACE and TOKEN_NO_REPLACE
 
   // Feed DMA the 1st buffer desc addr
   // To receive data from the I2S slave,
