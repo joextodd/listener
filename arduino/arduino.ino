@@ -1,3 +1,5 @@
+#include <ESP8266WiFi.h>
+
 extern "C" {
 #include "user_interface.h"
 #include "i2s_reg.h"
@@ -6,15 +8,17 @@ extern "C" {
 void rom_i2c_writeReg_Mask(int, int, int, int, int, int);
 }
 
-#include <ESP8266WiFi.h>
+//#define DEBUG
 
-#define I2SI_PWR        4u
+#define I2S_24BIT       3     // I2S 24 bit half data
+#define I2S_LEFT        2     // I2S RX Left channel
+
 #define I2SI_DATA       12    // I2S data on GPIO12
 #define I2SI_BCK        13    // I2S clk on GPIO13
 #define I2SI_WS         14    // I2S select on GPIO14
 
 #define SLC_BUF_CNT     4     // Number of buffers in the I2S circular buffer
-#define SLC_BUF_LEN     512   // Length of one buffer, in 32-bit words.
+#define SLC_BUF_LEN     128   // Length of one buffer, in 32-bit words.
 
 typedef struct {
   uint32_t blocksize:12;
@@ -31,7 +35,9 @@ typedef struct {
 static sdio_queue_t i2s_slc_items[SLC_BUF_CNT];  // I2S DMA buffer descriptors
 static uint32_t *i2s_slc_buf_pntr[SLC_BUF_CNT];  // Pointer to the I2S DMA buffer data
 static volatile uint32_t rx_buf_cnt = 0;
+static volatile uint32_t counter = 0;
 
+int32_t convert(int32_t value);
 void i2s_init();
 void slc_init();
 void i2s_set_rate(uint32_t rate);
@@ -42,46 +48,69 @@ setup()
 {
   rx_buf_cnt = 0;
 
-  pinMode(I2SI_PWR, OUTPUT);
   pinMode(I2SI_WS, OUTPUT);
   pinMode(I2SI_BCK, OUTPUT);
   pinMode(I2SI_DATA, INPUT);
-  digitalWrite(I2SI_PWR, HIGH);
-
+  
   WiFi.forceSleepBegin();
   delay(500);
 
   Serial.begin(115200);
+#ifdef DEBUG
   Serial.println("I2S receiver");
+#endif
 
   slc_init();
+#ifdef DEBUG
   Serial.println("SLC started");
+#endif
 
   i2s_init();
+#ifdef DEBUG
   Serial.println("Initialised");
+#endif
+
+  delay(3000);
 }
 
-/*
- * TODO: Fix need to wiggle LRCL to start data.
- */
 void
 loop()
 {
   uint32_t cnt;
+  int32_t value;
 
   if (cnt != rx_buf_cnt) {
-    for (int y = 0; y < SLC_BUF_LEN; y++) {
-      if (i2s_slc_buf_pntr[rx_buf_cnt][y] > 0) {
-        int32_t value = ~(i2s_slc_buf_pntr[rx_buf_cnt][y]);
-        value >>= 14;
-        String withScale = "-131072 ";
+    for (int i = 0; i < SLC_BUF_LEN; i++) {
+      if (i2s_slc_buf_pntr[rx_buf_cnt][i] > 0) {
+        value = convert((int32_t)i2s_slc_buf_pntr[rx_buf_cnt][i]);
+        String withScale = "-1000 ";
         withScale += value;
-        withScale += " 131072";
+        withScale += " 1000";
         Serial.println(withScale);
       }
     }
     cnt = rx_buf_cnt;
   }
+}
+
+/*
+ * Convert I2S data. 
+ * Data is 18 bit signed, MSBit first, two's complement.
+ * Note: We can only send 31 cycles from ESP8266 so we only
+ * shift by 13 instead of 14.
+ */
+int32_t
+convert(int32_t value)
+{
+  uint32_t sign;
+  uint32_t mask;
+
+  mask = (1 << 18);
+  value >>= 13;
+  if (value & mask) {
+    value -= mask;
+  }
+  return value - 240200;
 }
 
 /*
@@ -104,18 +133,21 @@ i2s_init()
   I2SC &= ~(I2SRST);
 
   // Reset DMA
-  I2SFC &= ~(I2SDE | (I2STXFMM << I2STXFM) | (I2SRXFMM << I2SRXFM));
+  I2SFC &= ~(I2SDE | (I2SRXFMM << I2SRXFM));
 
   // Enable DMA
-  I2SFC |= I2SDE;
+  I2SFC |= I2SDE | (I2S_24BIT << I2SRXFM);
 
   // Set RX single channel (left)
   I2SCC &= ~((I2STXCMM << I2STXCM) | (I2SRXCMM << I2SRXCM));
-//  I2SCC |= (2 << I2SRXCM);
+  I2SCC |= (I2S_LEFT << I2SRXCM);
   i2s_set_rate(32000);
 
   // Set RX data to be received
   I2SRXEN = SLC_BUF_LEN;
+
+  // Bits mode
+  I2SC |= (15 << I2SBM);
 
   // Start receiver
   I2SC |= I2SRXS;
@@ -129,8 +161,10 @@ i2s_set_rate(uint32_t rate)
 {
   uint32_t i2s_clock_div = (I2SBASEFREQ / (rate * 32)) & I2SCDM;
   uint8_t i2s_bck_div = (I2SBASEFREQ / (rate * i2s_clock_div)) & I2SBDM;
+#ifdef DEBUG
   Serial.printf("Rate %u Div %u Bck %u Freq %u\n",
   rate, i2s_clock_div, i2s_bck_div, I2SBASEFREQ / (i2s_clock_div * i2s_bck_div));
+#endif
 
   // RX master mode, RX MSB shift, right first, msb right
   I2SC &= ~(I2STSM | I2SRSM | (I2SBMM << I2SBM) | (I2SBDM << I2SBD) | (I2SCDM << I2SCD));
@@ -209,5 +243,6 @@ slc_isr(void *para)
     finished->owner = 1;
     rx_buf_cnt = (rx_buf_cnt + 1) % SLC_BUF_CNT;
     ETS_SLC_INTR_ENABLE();
+    counter++;
   }
 }
