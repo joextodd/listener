@@ -10,6 +10,7 @@ void rom_i2c_writeReg_Mask(int, int, int, int, int, int);
 
 //#define DEBUG
 
+#define I2S_CLK_FREQ    160000000
 #define I2S_24BIT       3     // I2S 24 bit half data
 #define I2S_LEFT        2     // I2S RX Left channel
 
@@ -35,7 +36,7 @@ typedef struct {
 static sdio_queue_t i2s_slc_items[SLC_BUF_CNT];  // I2S DMA buffer descriptors
 static uint32_t *i2s_slc_buf_pntr[SLC_BUF_CNT];  // Pointer to the I2S DMA buffer data
 static volatile uint32_t rx_buf_cnt = 0;
-static volatile uint32_t counter = 0;
+static volatile bool rx_buf_flag = false;
 
 int32_t convert(int32_t value);
 void i2s_init();
@@ -51,7 +52,7 @@ setup()
   pinMode(I2SI_WS, OUTPUT);
   pinMode(I2SI_BCK, OUTPUT);
   pinMode(I2SI_DATA, INPUT);
-  
+
   WiFi.forceSleepBegin();
   delay(500);
 
@@ -70,31 +71,37 @@ setup()
   Serial.println("Initialised");
 #endif
 
-  delay(3000);
 }
 
 void
 loop()
 {
-  uint32_t cnt;
   int32_t value;
 
-  if (cnt != rx_buf_cnt) {
-    for (int i = 0; i < SLC_BUF_LEN; i++) {
-      if (i2s_slc_buf_pntr[rx_buf_cnt][i] > 0) {
-        value = convert((int32_t)i2s_slc_buf_pntr[rx_buf_cnt][i]);
-        String withScale = "-1000 ";
-        withScale += value;
-        withScale += " 1000";
-        Serial.println(withScale);
+#ifdef DEBUG
+  delay(1000);
+  Serial.println(rx_buf_cnt);
+  rx_buf_cnt = 0;
+#else
+  if (rx_buf_flag) {
+    for (int x = 0; x < SLC_BUF_CNT; x++) {
+      for (int y = 0; y < SLC_BUF_LEN; y++) {
+        if (i2s_slc_buf_pntr[x][y] > 0) {
+          value = convert((int32_t)i2s_slc_buf_pntr[x][y]);
+          String withScale = "-1 ";
+          withScale += (float)value / 4096.0f;
+          withScale += " 1";
+          Serial.println(withScale);
+        }
       }
     }
-    cnt = rx_buf_cnt;
+    rx_buf_flag = false;
   }
+#endif
 }
 
 /*
- * Convert I2S data. 
+ * Convert I2S data.
  * Data is 18 bit signed, MSBit first, two's complement.
  * Note: We can only send 31 cycles from ESP8266 so we only
  * shift by 13 instead of 14.
@@ -159,16 +166,16 @@ i2s_init()
 void
 i2s_set_rate(uint32_t rate)
 {
-  uint32_t i2s_clock_div = (I2SBASEFREQ / (rate * 32)) & I2SCDM;
-  uint8_t i2s_bck_div = (I2SBASEFREQ / (rate * i2s_clock_div)) & I2SBDM;
+  uint32_t i2s_clock_div = (I2S_CLK_FREQ / (rate * 31 * 2)) & I2SCDM;
+  uint32_t i2s_bck_div = (I2S_CLK_FREQ / (rate * i2s_clock_div)) & I2SBDM;
 #ifdef DEBUG
   Serial.printf("Rate %u Div %u Bck %u Freq %u\n",
-  rate, i2s_clock_div, i2s_bck_div, I2SBASEFREQ / (i2s_clock_div * i2s_bck_div));
+  rate, i2s_clock_div, i2s_bck_div, I2S_CLK_FREQ / (16 * 5)) ;
 #endif
 
   // RX master mode, RX MSB shift, right first, msb right
   I2SC &= ~(I2STSM | I2SRSM | (I2SBMM << I2SBM) | (I2SBDM << I2SBD) | (I2SCDM << I2SCD));
-  I2SC |= I2SRF | I2SMR | I2SRMS | ((i2s_bck_div - 1) << I2SBD) | ((i2s_clock_div - 1) << I2SCD);
+  I2SC |= I2SRF | I2SMR | I2SRMS | ((16) << I2SBD) | ((5) << I2SCD);
 }
 
 /*
@@ -183,7 +190,7 @@ slc_init()
 
     i2s_slc_items[x].unused = 0;
     i2s_slc_items[x].owner = 1;
-    i2s_slc_items[x].eof = 1;
+    i2s_slc_items[x].eof = 0;
     i2s_slc_items[x].sub_sof = 0;
     i2s_slc_items[x].datalen = SLC_BUF_LEN * 4;
     i2s_slc_items[x].blocksize = SLC_BUF_LEN * 4;
@@ -239,10 +246,15 @@ slc_isr(void *para)
     ETS_SLC_INTR_DISABLE();
     sdio_queue_t *finished = (sdio_queue_t*)SLCTXEDA;
 
-    // Thanks to cnlohr for the undocumented magic
+    finished->eof = 0;
     finished->owner = 1;
-    rx_buf_cnt = (rx_buf_cnt + 1) % SLC_BUF_CNT;
+    finished->datalen = 0;
+    if (rx_buf_cnt++ == SLC_BUF_CNT) {
+      rx_buf_flag = true;
+#ifndef DEBUG
+      rx_buf_cnt = 0;
+#endif
+    }
     ETS_SLC_INTR_ENABLE();
-    counter++;
   }
 }
