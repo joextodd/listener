@@ -1,5 +1,15 @@
+/**
+ ******************************************************************************
+ * @file    arduino.ino
+ * @author  Joe Todd
+ * @version
+ * @date    November 2017
+ * @brief   I2S interface for ESP8266 and SPH0645 MEMS microphone.
+ *
+  ******************************************************************************/
 #include <ESP8266WiFi.h>
 
+/* Includes -------------------------------------------------------------------*/
 extern "C" {
 #include "user_interface.h"
 #include "i2s_reg.h"
@@ -9,6 +19,7 @@ void rom_i2c_writeReg_Mask(int, int, int, int, int, int);
 }
 
 //#define DEBUG
+#define PLOT
 
 #define I2S_CLK_FREQ    160000000
 #define I2S_24BIT       3     // I2S 24 bit half data
@@ -36,6 +47,7 @@ typedef struct {
 static sdio_queue_t i2s_slc_items[SLC_BUF_CNT];  // I2S DMA buffer descriptors
 static uint32_t *i2s_slc_buf_pntr[SLC_BUF_CNT];  // Pointer to the I2S DMA buffer data
 static volatile uint32_t rx_buf_cnt = 0;
+static volatile uint32_t rx_buf_idx = 0;
 static volatile bool rx_buf_flag = false;
 
 int32_t convert(int32_t value);
@@ -44,6 +56,7 @@ void slc_init();
 void i2s_set_rate(uint32_t rate);
 void slc_isr(void *para);
 
+/* Main -----------------------------------------------------------------------*/
 void
 setup()
 {
@@ -82,17 +95,16 @@ loop()
   delay(1000);
   Serial.println(rx_buf_cnt);
   rx_buf_cnt = 0;
-#else
+#endif
+#ifdef PLOT
   if (rx_buf_flag) {
-    for (int x = 0; x < SLC_BUF_CNT; x++) {
-      for (int y = 0; y < SLC_BUF_LEN; y++) {
-        if (i2s_slc_buf_pntr[x][y] > 0) {
-          value = convert((int32_t)i2s_slc_buf_pntr[x][y]);
-          String withScale = "-1 ";
-          withScale += (float)value / 4096.0f;
-          withScale += " 1";
-          Serial.println(withScale);
-        }
+    for (int x = 0; x < SLC_BUF_LEN; x++) {
+      if (i2s_slc_buf_pntr[rx_buf_idx][x] > 0) {
+        value = convert((int32_t)i2s_slc_buf_pntr[rx_buf_idx][x]);
+        String withScale = "-1 ";
+        withScale += (float)value / 4096.0f;
+        withScale += " 1";
+        Serial.println(withScale);
       }
     }
     rx_buf_flag = false;
@@ -100,7 +112,9 @@ loop()
 #endif
 }
 
-/*
+/* Function definitions -------------------------------------------------------*/
+
+/**
  * Convert I2S data.
  * Data is 18 bit signed, MSBit first, two's complement.
  * Note: We can only send 31 cycles from ESP8266 so we only
@@ -120,7 +134,7 @@ convert(int32_t value)
   return value - 240200;
 }
 
-/*
+/**
  * Initialise I2S as a RX master.
  */
 void
@@ -160,26 +174,30 @@ i2s_init()
   I2SC |= I2SRXS;
 }
 
-/*
- * Set I2S clock
+/**
+ * Set I2S clock.
+ * I2S bits mode only has space for 15 extra bits,
+ * 31 in total. The
  */
 void
 i2s_set_rate(uint32_t rate)
 {
   uint32_t i2s_clock_div = (I2S_CLK_FREQ / (rate * 31 * 2)) & I2SCDM;
-  uint32_t i2s_bck_div = (I2S_CLK_FREQ / (rate * i2s_clock_div)) & I2SBDM;
+  uint32_t i2s_bck_div = (I2S_CLK_FREQ / (rate * i2s_clock_div * 31 * 2)) & I2SBDM;
 #ifdef DEBUG
   Serial.printf("Rate %u Div %u Bck %u Freq %u\n",
-  rate, i2s_clock_div, i2s_bck_div, I2S_CLK_FREQ / (16 * 5)) ;
+  rate, i2s_clock_div, i2s_bck_div, I2S_CLK_FREQ / (i2s_clock_div * i2s_bck_div * 31 * 2)) ;
 #endif
 
   // RX master mode, RX MSB shift, right first, msb right
   I2SC &= ~(I2STSM | I2SRSM | (I2SBMM << I2SBM) | (I2SBDM << I2SBD) | (I2SCDM << I2SCD));
-  I2SC |= I2SRF | I2SMR | I2SRMS | ((16) << I2SBD) | ((5) << I2SCD);
+  I2SC |= I2SRF | I2SMR | I2SRMS | (i2s_bck_div << I2SBD) | (i2s_clock_div << I2SCD);
 }
 
-/*
- * Initialize the SLC module for DMA operation
+/**
+ * Initialize the SLC module for DMA operation.
+ * Counter intuitively, we use the TXLINK here to
+ * receive data.
  */
 void
 slc_init()
@@ -210,8 +228,6 @@ slc_init()
   SLCRXDC |= SLCBINR | SLCBTNR;   // Enable INFOR_NO_REPLACE and TOKEN_NO_REPLACE
 
   // Feed DMA the 1st buffer desc addr
-  // To receive data from the I2S slave,
-  // counter intuitively we need to use the TXLINK.
   SLCTXL &= ~(SLCTXLAM << SLCTXLA);
   SLCTXL |= (uint32_t)&i2s_slc_items[0] << SLCTXLA;
 
@@ -225,7 +241,7 @@ slc_init()
   SLCTXL |= SLCTXLS;
 }
 
-/*
+/**
  * Triggered when SLC has finished writing
  * to one of the buffers.
  */
@@ -249,12 +265,14 @@ slc_isr(void *para)
     finished->eof = 0;
     finished->owner = 1;
     finished->datalen = 0;
-    if (rx_buf_cnt++ == SLC_BUF_CNT) {
-      rx_buf_flag = true;
-#ifndef DEBUG
-      rx_buf_cnt = 0;
-#endif
+
+    for (int i = 0; i < SLC_BUF_CNT; i++) {
+      if (finished == &i2s_slc_items[i]) {
+        rx_buf_idx = i;
+      }
     }
+    rx_buf_cnt++;
+    rx_buf_flag = true;
     ETS_SLC_INTR_ENABLE();
   }
 }
