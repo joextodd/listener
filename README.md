@@ -11,3 +11,10 @@ Requirements
 ------------
 
 See https://github.com/esp8266/Arduino
+
+Upload
+------
+
+To compile and upload to device
+
+    make flash
