@@ -18,3 +18,10 @@ Upload
 To compile and upload to device
 
     make flash
+
+
+Credit
+------
+
+- https://github.com/cnlohr
+- https://github.com/plerup/makeEspArduino
