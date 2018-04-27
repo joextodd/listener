@@ -9,7 +9,6 @@
   ******************************************************************************/
 #include <ESP8266WiFi.h>
 
-/* Includes -------------------------------------------------------------------*/
 extern "C" {
 #include "user_interface.h"
 #include "i2s_reg.h"
@@ -18,30 +17,29 @@ extern "C" {
 void rom_i2c_writeReg_Mask(int, int, int, int, int, int);
 }
 
-//#define DEBUG
-#define PLOT
+// #define DEBUG
 
-#define I2S_CLK_FREQ    160000000
-#define I2S_24BIT       3     // I2S 24 bit half data
-#define I2S_LEFT        2     // I2S RX Left channel
+#define I2S_CLK_FREQ      160000000  // Hz
+#define I2S_24BIT         3     // I2S 24 bit half data
+#define I2S_LEFT          2     // I2S RX Left channel
 
-#define I2SI_DATA       12    // I2S data on GPIO12
-#define I2SI_BCK        13    // I2S clk on GPIO13
-#define I2SI_WS         14    // I2S select on GPIO14
+#define I2SI_DATA         12    // I2S data on GPIO12
+#define I2SI_BCK          13    // I2S clk on GPIO13
+#define I2SI_WS           14    // I2S select on GPIO14
 
-#define SLC_BUF_CNT     4     // Number of buffers in the I2S circular buffer
-#define SLC_BUF_LEN     128   // Length of one buffer, in 32-bit words.
+#define SLC_BUF_CNT       8     // Number of buffers in the I2S circular buffer
+#define SLC_BUF_LEN       64    // Length of one buffer, in 32-bit words.
 
 typedef struct {
-  uint32_t blocksize:12;
-  uint32_t datalen:12;
-  uint32_t unused:5;
-  uint32_t sub_sof:1;
-  uint32_t eof:1;
-  uint32_t owner:1;
+  uint32_t blocksize      : 12;
+  uint32_t datalen        : 12;
+  uint32_t unused         : 5;
+  uint32_t sub_sof        : 1;
+  uint32_t eof            : 1;
+  volatile uint32_t owner : 1;
 
-  uint32_t buf_ptr;
-  uint32_t next_link_ptr;
+  uint32_t *buf_ptr;
+  uint32_t *next_link_ptr;
 } sdio_queue_t;
 
 static sdio_queue_t i2s_slc_items[SLC_BUF_CNT];  // I2S DMA buffer descriptors
@@ -70,46 +68,32 @@ setup()
   delay(500);
 
   Serial.begin(115200);
-#ifdef DEBUG
-  Serial.println("I2S receiver");
-#endif
 
   slc_init();
-#ifdef DEBUG
-  Serial.println("SLC started");
-#endif
-
   i2s_init();
-#ifdef DEBUG
-  Serial.println("Initialised");
-#endif
-
 }
 
 void
 loop()
 {
   int32_t value;
+  char withScale[256];
 
-#ifdef DEBUG
-  delay(1000);
-  Serial.println(rx_buf_cnt);
-  rx_buf_cnt = 0;
-#endif
-#ifdef PLOT
   if (rx_buf_flag) {
     for (int x = 0; x < SLC_BUF_LEN; x++) {
       if (i2s_slc_buf_pntr[rx_buf_idx][x] > 0) {
+#ifdef DEBUG
+        Serial.print(i2s_slc_buf_pntr[rx_buf_idx][x], BIN);
+        Serial.println("");
+#else
         value = convert((int32_t)i2s_slc_buf_pntr[rx_buf_idx][x]);
-        String withScale = "-1 ";
-        withScale += (float)value / 4096.0f;
-        withScale += " 1";
+        sprintf(withScale, "-1 %f 1", (float)value / 4096.0f);
         Serial.println(withScale);
+#endif
       }
     }
     rx_buf_flag = false;
   }
-#endif
 }
 
 /* Function definitions -------------------------------------------------------*/
@@ -184,9 +168,10 @@ i2s_set_rate(uint32_t rate)
 {
   uint32_t i2s_clock_div = (I2S_CLK_FREQ / (rate * 31 * 2)) & I2SCDM;
   uint32_t i2s_bck_div = (I2S_CLK_FREQ / (rate * i2s_clock_div * 31 * 2)) & I2SBDM;
+
 #ifdef DEBUG
   Serial.printf("Rate %u Div %u Bck %u Freq %u\n",
-  rate, i2s_clock_div, i2s_bck_div, I2S_CLK_FREQ / (i2s_clock_div * i2s_bck_div * 31 * 2)) ;
+  rate, i2s_clock_div, i2s_bck_div, I2S_CLK_FREQ / (i2s_clock_div * i2s_bck_div * 31 * 2));
 #endif
 
   // RX master mode, RX MSB shift, right first, msb right
@@ -212,8 +197,8 @@ slc_init()
     i2s_slc_items[x].sub_sof = 0;
     i2s_slc_items[x].datalen = SLC_BUF_LEN * 4;
     i2s_slc_items[x].blocksize = SLC_BUF_LEN * 4;
-    i2s_slc_items[x].buf_ptr = (uint32_t)&i2s_slc_buf_pntr[x][0];
-    i2s_slc_items[x].next_link_ptr = (int)((x < (SLC_BUF_CNT - 1)) ? (&i2s_slc_items[x + 1]) : (&i2s_slc_items[0]));
+    i2s_slc_items[x].buf_ptr = (uint32_t *)&i2s_slc_buf_pntr[x][0];
+    i2s_slc_items[x].next_link_ptr = (uint32_t *)((x < (SLC_BUF_CNT - 1)) ? (&i2s_slc_items[x + 1]) : (&i2s_slc_items[0]));
   }
 
   // Reset DMA
@@ -245,7 +230,7 @@ slc_init()
  * Triggered when SLC has finished writing
  * to one of the buffers.
  */
-void
+void ICACHE_RAM_ATTR
 slc_isr(void *para)
 {
   uint32_t status;

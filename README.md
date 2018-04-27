@@ -23,5 +23,5 @@ To compile and upload to device
 Credit
 ------
 
-- https://github.com/cnlohr
 - https://github.com/plerup/makeEspArduino
+- https://github.com/cnlohr
