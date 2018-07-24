@@ -30,6 +30,16 @@ void rom_i2c_writeReg_Mask(int, int, int, int, int, int);
 #define SLC_BUF_CNT       8     // Number of buffers in the I2S circular buffer
 #define SLC_BUF_LEN       64    // Length of one buffer, in 32-bit words.
 
+/**
+ * Convert I2S data.
+ * Data is 18 bit signed, MSBit first, two's complement.
+ * Note: We can only send 31 cycles from ESP8266 so we only
+ * shift by 13 instead of 14.
+ * The 240200 is a magic calibration number I haven't figured
+ * out yet.
+ */
+#define convert(sample) (((int32_t)(sample) >> 13) - 240200)
+
 typedef struct {
   uint32_t blocksize      : 12;
   uint32_t datalen        : 12;
@@ -48,7 +58,6 @@ static volatile uint32_t rx_buf_cnt = 0;
 static volatile uint32_t rx_buf_idx = 0;
 static volatile bool rx_buf_flag = false;
 
-int32_t convert(int32_t value);
 void i2s_init();
 void slc_init();
 void i2s_set_rate(uint32_t rate);
@@ -86,7 +95,7 @@ loop()
         Serial.print(i2s_slc_buf_pntr[rx_buf_idx][x], BIN);
         Serial.println("");
 #else
-        value = convert((int32_t)i2s_slc_buf_pntr[rx_buf_idx][x]);
+        value = convert(i2s_slc_buf_pntr[rx_buf_idx][x]);
         sprintf(withScale, "-1 %f 1", (float)value / 4096.0f);
         Serial.println(withScale);
 #endif
@@ -97,26 +106,6 @@ loop()
 }
 
 /* Function definitions -------------------------------------------------------*/
-
-/**
- * Convert I2S data.
- * Data is 18 bit signed, MSBit first, two's complement.
- * Note: We can only send 31 cycles from ESP8266 so we only
- * shift by 13 instead of 14.
- */
-int32_t
-convert(int32_t value)
-{
-  uint32_t sign;
-  uint32_t mask;
-
-  mask = (1 << 18);
-  value >>= 13;
-  if (value & mask) {
-    value -= mask;
-  }
-  return value - 240200;
-}
 
 /**
  * Initialise I2S as a RX master.
@@ -146,7 +135,7 @@ i2s_init()
   // Set RX single channel (left)
   I2SCC &= ~((I2STXCMM << I2STXCM) | (I2SRXCMM << I2SRXCM));
   I2SCC |= (I2S_LEFT << I2SRXCM);
-  i2s_set_rate(32000);
+  i2s_set_rate(16667);
 
   // Set RX data to be received
   I2SRXEN = SLC_BUF_LEN;
